@@ -59,6 +59,7 @@
     </style>
 </head>
 <body>
+    <div style="position:fixed;top:0;left:0;right:0;background:#ff6b35;color:white;text-align:center;padding:6px;font-size:13px;z-index:9999;">🎮 Demo client — deploy server.js on Railway/Render for full multiplayer. <a href="https://github.com/caytec/nature-guardians" style="color:white">Get server code →</a></div>
     <canvas id="gameCanvas"></canvas>
     <div id="lobby">
         <h1>Nature's Guardians</h1>
@@ -82,7 +83,8 @@
 
     <script>
         let gameState = 'lobby';
-        const socket = io();
+        const SERVER_URL = window.location.hostname === 'localhost' ? 'http://localhost:3000' : '';
+        const socket = io(SERVER_URL);
         let playerId = null;
         let roomId = null;
         const playerProfile = { level: 1, xp: 0, allTimeScore: 0 };
