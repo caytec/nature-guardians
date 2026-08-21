@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nature's Guardians</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400&display=swap" rel="stylesheet">
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    <style>
+        body {
+            background-color: #0d0d1a;
+            font-family: 'Cinzel', serif;
+            margin: 0;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+        #lobby {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+        }
+        #nameInput, #joinButton {
+            color: gold;
+            font-size: 18px;
+            margin: 5px;
+        }
+        #globalLeaderboard {
+            margin-top: 10px;
+            color: white;
+        }
+        #deathScreen, #countdown, #reconnectOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 48px;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.7);
+            visibility: hidden;
+        }
+        #reconnectOverlay {
+            visibility: hidden;
+        }
+        #respawnBtn, #lobbyBtn {
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="lobby">
+        <h1>Nature's Guardians</h1>
+        <input id="nameInput" type="text" placeholder="Enter your name" />
+        <button id="joinButton">Join Game</button>
+        <div id="globalLeaderboard"></div>
+    </div>
+    <div id="deathScreen">
+        <h1>YOU DIED</h1>
+        <p id="finalScoreText"></p>
+        <p id="bestScoreText"></p>
+        <button id="respawnBtn">Respawn</button>
+        <button id="lobbyBtn">Return to Lobby</button>
+    </div>
+    <div id="countdown">
+        <h1 id="countdownText"></h1>
+    </div>
+    <div id="reconnectOverlay">
+        <h1>Reconnecting...</h1>
+    </div>
+
+    <script>
+        let gameState = 'lobby';
+        const socket = io();
+        let playerId = null;
+        let roomId = null;
+        const playerProfile = { level: 1, xp: 0, allTimeScore: 0 };
+        let predictedX = 1500;
+        let predictedY = 1500;
+        let playerHp = 100;
+        const playerMaxHp = 100;
+        let playerScore = 0;
+        let playerXp = 0;
+        const playerLevel = 1;
+        let ping = 0;
+        let pingStart = 0;
+        let gameTimer = 600;
+        let leaderboard = [];
+        let particles = [];
+        const SPEED = 4;
+        const WORLD_W = 3000;
+        const WORLD_H = 3000;
+        const remoteEntities = new Map();
+        let serverBots = [];
+        let serverCollectibles = [];
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = Math.random() * 6 - 3;
+                this.vy = Math.random() * 6 - 3;
+                this.life = 60;
+                this.maxLife = 60;
+                this.size = Math.random() * 4 + 2;
+            }
+
+            spawnParticles() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+            }
+
+            updateParticles() {
+                if (this.life < 1) {
+                    return false;
+                }
+                this.spawnParticles();
+                return true;
+            }
+
+            drawParticles() {
+                const alpha = this.life / this.maxLife;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.globalAlpha = alpha;
+                ctx.fill();
+                ctx.globalAlpha = 1; // reset alpha
+            }
+        }
+
+        const cam = {
+            x: 0,
+            y: 0,
+            updateCamera() {
+                this.x = Math.max(0, Math.min(predictedX, WORLD_W));
+                this.y = Math.max(0, Math.min(predictedY, WORLD_H));
+            }
+        };
+
+        function updateInterpolation() {
+            for (let [id, entity] of remoteEntities) {
+                entity.renderX += (entity.x - entity.renderX) * 0.2;
+                entity.renderY += (entity.y - entity.renderY) * 0.2;
+            }
+        }
+
+        socket.on('connect', () => {
+            socket.emit('requestLeaderboard');
+        });
+
+        socket.on('roomJoined', (data) => {
+            playerId = data.playerId;
+            roomId = data.roomId;
+            hideLobby();
+            startCountdown();
+        });
+
+        socket.on('gameState', (data) => {
+            gameTimer = data.timer;
+            serverBots = data.bots;
+            updateLeaderboard(data.leaderboard);
+            Object.entries(data.players).forEach(([id, player]) => {
+                if (!remoteEntities.has(id)) {
+                    remoteEntities.set(id, { ...player, renderX: player.x, renderY: player.y });
+                } else {
+                    const entity = remoteEntities.get(id);
+                    entity.x = player.x;
+                    entity.y = player.y;
+                    entity.hp = player.hp;
+                }
+            });
+            updateInterpolation();
+        });
+
+        socket.on('playerDied', (data) => {
+            if (data.userId === playerId) {
+                spawnParticles(predictedX, predictedY);
+                showDeathScreen(playerScore, playerProfile.allTimeScore);
+            }
+        });
+
+        socket.on('disconnect', () => {
+            document.getElementById('reconnectOverlay').style.visibility = 'visible';
+        });
+
+        socket.on('reconnect', () => {
+            document.getElementById('reconnectOverlay').style.visibility = 'hidden';
+        });
+
+        function hideLobby() {
+            document.getElementById('lobby').style.display = 'none';
+        }
+
+        function showDeathScreen(score, bestScore) {
+            document.getElementById('finalScoreText').innerText = `Final Score: ${score}`;
+            document.getElementById('bestScoreText').innerText = `Best Score: ${bestScore}`;
+            document.getElementById('deathScreen').style.visibility = 'visible';
+        }
+
+        function startCountdown() {
+            gameState = 'countdown';
+            document.getElementById('countdown').style.visibility = 'visible';
+            let countdownStep = 3;
+            const interval = setInterval(() => {
+                if (countdownStep > 0) {
+                    document.getElementById('countdownText').innerText = countdownStep;
+                    countdownStep--;
+                } else if (countdownStep === 0) {
+                    document.getElementById('countdownText').innerText = 'GO!';
+                    countdownStep--;
+                } else {
+                    clearInterval(interval);
+                    document.getElementById('countdown').style.visibility = 'hidden';
+                    gameState = 'playing';
+                }
+            }, 1000);
+        }
+
+        function updatePrediction() {
+            if (gameState === 'playing') {
+                let dx = 0;
+                let dy = 0;
+                const keys = { w: false, a: false, s: false, d: false };
+                // Capture WASD input
+                if (keys.w) dy = -1;
+                if (keys.s) dy = 1;
+                if (keys.a) dx = -1;
+                if (keys.d) dx = 1;
+
+                // Normalize dx, dy
+                const length = Math.sqrt(dx * dx + dy * dy);
+                if (length > 0) {
+                    dx /= length;
+                    dy /= length;
+                }
+                
+                predictedX += dx * SPEED;
+                predictedY += dy * SPEED;
+                
+                // Emit input
+                socket.emit('playerInput', { dx, dy });
+            }
+        }
+
+        function drawWorld() {
+            ctx.save();
+            ctx.translate(-cam.x, -cam.y);
+
+            // Draw fog of war
+            const gradient = ctx.createRadialGradient(predictedX, predictedY, 0, predictedX, predictedY, 500);
+            gradient.addColorStop(0, 'rgba(255,255,255,0.2)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0.6)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+            // Draw Collectibles
+            serverCollectibles.forEach(collectible => {
+                ctx.save();
+                const pulse = Math.sin(Date.now() / 500) * 5 + 10;
+                ctx.shadowBlur = pulse;
+                ctx.shadowColor = 'gold';
+                ctx.beginPath();
+                ctx.arc(collectible.x, collectible.y, 10, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 215, 0, 1)';
+                ctx.fill();
+                ctx.restore();
+            });
+
+            // Draw Bots
+            serverBots.forEach(bot => {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(bot.x, bot.y, 20, 0, Math.PI * 2);
+                ctx.fillStyle = 'lightcoral';
+                ctx.fill();
+                ctx.restore();
+            });
+
+            // Draw Remote Players
+            remoteEntities.forEach((entity, id) => {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(entity.renderX, entity.renderY, 20, 0, Math.PI * 2);
+                ctx.fillStyle = 'cornflowerblue';
+                ctx.fill();
+                ctx.fillText(entity.username, entity.renderX, entity.renderY - 30);
+                ctx.restore();
+            });
+
+            // Draw Local Player
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(predictedX, predictedY, 20, 0, Math.PI * 2);
+            ctx.fillStyle = 'gold';
+            ctx.fill();
+            ctx.restore();
+            ctx.restore();
+        }
+
+        function drawHUD() {
+            // Draw HP bar
+            ctx.fillStyle = 'green';
+            ctx.fillRect(20, 20, 200 * (playerHp / playerMaxHp), 16);
+
+            // Draw XP bar
+            ctx.fillStyle = 'blue';
+            ctx.fillRect(20, 44, 200 * (playerXp / 100), 16);
+
+            // Draw Level
+            ctx.fillStyle = 'white';
+            ctx.fillText(`Level: ${playerLevel}`, 20, 62);
+
+            // Draw Score
+            ctx.fillText(`Score: ${playerScore}`, 20, 80);
+
+            // Draw Timer
+            const minutes = Math.floor(gameTimer / 60);
+            const seconds = gameTimer % 60;
+            ctx.fillText(`Time: ${minutes}:${seconds < 10 ? '0' : ''}${seconds}`, window.innerWidth / 2, 20);
+        }
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (gameState === 'playing') {
+                cam.updateCamera();
+                updatePrediction();
+                drawWorld();
+                drawHUD();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        // Call to start the game loop
+        requestAnimationFrame(gameLoop);
+
+        // Button Events
+        document.getElementById('joinButton').onclick = () => {
+            const username = document.getElementById('nameInput').value;
+            socket.emit('joinRoom', { username });
+        };
+
+        document.getElementById('respawnBtn').onclick = () => {
+            socket.emit('respawn');
+            document.getElementById('deathScreen').style.visibility = 'hidden';
+        };
+
+        document.getElementById('lobbyBtn').onclick = () => {
+            document.getElementById('deathScreen').style.visibility = 'hidden';
+            document.getElementById('lobby').style.display = 'block';
+            gameState = 'lobby';
+        };
+    </script>
+</body>
+</html>
